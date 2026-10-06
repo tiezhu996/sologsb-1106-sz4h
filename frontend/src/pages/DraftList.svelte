@@ -79,23 +79,17 @@
     })
 
     const baseColorNames = ['墨线版', '黄版', '红版', '绿版'] as const
-    await db.transaction('rw', db.blocks, async () => {
-      for (let index = 0; index < baseColorNames.length; index += 1) {
-        const blockName = baseColorNames[index]
-        if (!blockName) continue
-        await db.blocks.add({
-          id: `block-${crypto.randomUUID()}`,
-          draftId: id,
-          blockName,
-          colorNo: index + 1,
-          woodType: index === 0 ? '黄杨' : '梨木',
-          thicknessMm: index === 0 ? 18 : 20,
-          carvedBy: '',
-          state: '待刻',
-          defectNote: '',
-        })
-      }
-    })
+    for (let index = 0; index < baseColorNames.length; index += 1) {
+      const blockName = baseColorNames[index]
+      if (!blockName) continue
+      await blockStore.createWithInitialRevision({
+        draftId: id,
+        blockName,
+        colorNo: index + 1,
+        woodType: index === 0 ? '黄杨' : '梨木',
+        thicknessMm: index === 0 ? 18 : 20,
+      })
+    }
     await blockStore.load()
 
     title = ''

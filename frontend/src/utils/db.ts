@@ -2,20 +2,26 @@ import Dexie, { type Table } from 'dexie'
 import type { Draft } from '../types/draft'
 import type { Block } from '../types/block'
 import type { Carver } from '../types/carver'
-import type { PrintBatch } from '../types/batch'
+import type { PrintBatch, PrintRun } from '../types/batch'
 import type { ProcessNode } from '../types/node'
+import type { BlockRevision } from '../types/revision'
 
 type StoredRecord = Record<string, unknown> & { schemaRev?: number }
 
-class WoodprintDatabase extends Dexie {
+export const SCHEMA_REVISION = 3
+
+export class WoodprintDatabase extends Dexie {
   drafts!: Table<Draft, string>
   blocks!: Table<Block, string>
   carvers!: Table<Carver, string>
   batches!: Table<PrintBatch, string>
   nodes!: Table<ProcessNode, string>
+  blockRevisions!: Table<BlockRevision, string>
+  printRuns!: Table<PrintRun, string>
+  blockReviews!: Table<import('../types/batch').BlockReview, string>
 
-  constructor() {
-    super('gbwoodprint-db')
+  constructor(name = 'gbwoodprint-db') {
+    super(name)
 
     this.version(1).stores({
       drafts: 'id, genre, status, title',
@@ -39,6 +45,118 @@ class WoodprintDatabase extends Dexie {
           await transaction.table(tableName).toCollection().modify((record: StoredRecord) => {
             record.schemaRev = 2
           })
+        }
+      })
+
+    // v3：追加式版次。老数据按现有工序节点补首个版次；旧批次按现有版片补推断印次。
+    this.version(3)
+      .stores({
+        drafts: 'id, genre, status, title, schemaRev',
+        blocks: 'id, draftId, colorNo, carvedBy, state, schemaRev, currentRevNo',
+        carvers: 'id, specialty, skillLevel, name, schemaRev',
+        batches: 'id, draftId, batchNo, printedAt, schemaRev',
+        nodes: 'id, batchId, blockId, stage, seq, operator, schemaRev, revNo',
+        blockRevisions: 'id, blockId, revNo, origin, createdAt, [blockId+revNo]',
+        printRuns: 'id, batchId, draftId, blockId, revNo, reprintOf, supersededBy',
+        blockReviews: 'id, runId, blockId, batchId, revNo, decision, [runId+revNo]',
+      })
+      .upgrade(async (transaction) => {
+        // 先把旧表全部读出，再统一写，避免在升级事务内边读边改。
+        const [legacyBlocks, legacyNodes, legacyBatches] = await Promise.all([
+          transaction.table<StoredRecord, string>('blocks').toArray(),
+          transaction.table<StoredRecord, string>('nodes').toArray(),
+          transaction.table<StoredRecord, string>('batches').toArray(),
+        ])
+
+        for (const tableName of ['drafts', 'blocks', 'carvers', 'batches', 'nodes'] as const) {
+          await transaction.table(tableName).toCollection().modify((record: StoredRecord) => {
+            record.schemaRev = SCHEMA_REVISION
+          })
+        }
+
+        // 旧节点、旧批次不挪动、不覆盖：节点归属首版，后续改刀产生的节点才挂新版次。
+        await transaction
+          .table<StoredRecord, string>('nodes')
+          .toCollection()
+          .modify((record: StoredRecord) => {
+            if (typeof record.revNo !== 'number') record.revNo = 1
+          })
+
+        await transaction
+          .table<StoredRecord, string>('blocks')
+          .toCollection()
+          .modify((record: StoredRecord) => {
+            record.currentRevNo = 1
+          })
+
+        const firstRevisions: BlockRevision[] = []
+        const nodesByBlock = new Map<string, StoredRecord[]>()
+        for (const node of legacyNodes) {
+          if (typeof node.blockId !== 'string') continue
+          const list = nodesByBlock.get(node.blockId) ?? []
+          list.push(node)
+          nodesByBlock.set(node.blockId, list)
+        }
+
+        for (const block of legacyBlocks) {
+          const blockId = String(block.id)
+          const blockNodes = (nodesByBlock.get(blockId) ?? []).sort(
+            (a, b) => String(a.startedAt ?? '').localeCompare(String(b.startedAt ?? '')),
+          )
+          const earliestNode = blockNodes[0]
+          firstRevisions.push({
+            id: `rev-${blockId}-001`,
+            blockId,
+            revNo: 1,
+            // 来源缺失按未知保留：不据旧备注反推它是首刻还是某次返修。
+            origin: 'unknown',
+            operator: '未知',
+            createdAt: typeof earliestNode?.startedAt === 'string' ? earliestNode.startedAt : '',
+            note: '老数据升级：按现有工序节点补建首个版次，来源缺失记为未知。',
+            repairReason: '',
+            woodReplaced: false,
+            previousWoodType: null,
+            snapshot: {
+              blockName: block.blockName as BlockRevision['snapshot']['blockName'],
+              colorNo: Number(block.colorNo ?? 0),
+              woodType: block.woodType as BlockRevision['snapshot']['woodType'],
+              thicknessMm: Number(block.thicknessMm ?? 0),
+              carvedBy: typeof block.carvedBy === 'string' ? block.carvedBy : '',
+              state: block.state as BlockRevision['snapshot']['state'],
+              defectNote: typeof block.defectNote === 'string' ? block.defectNote : '',
+            },
+          })
+        }
+
+        // 旧批次按该画稿现有版片补印次；逐版偏差原文只存在批次总检里，拆不出就留空，不编造。
+        const inferredRuns: PrintRun[] = []
+        for (const batch of legacyBatches) {
+          const batchId = String(batch.id)
+          const draftBlocks = legacyBlocks.filter((block) => block.draftId === batch.draftId)
+          for (const block of draftBlocks) {
+            const blockId = String(block.id)
+            inferredRuns.push({
+              id: `run-${batchId}-${blockId}`,
+              batchId,
+              draftId: String(batch.draftId ?? ''),
+              blockId,
+              blockName: block.blockName as PrintRun['blockName'],
+              colorNo: Number(block.colorNo ?? 0),
+              revNo: 1,
+              pieceCount: Number(batch.pieceCount ?? 0),
+              deviation: '',
+              operator: '未知',
+              printedAt: typeof batch.printedAt === 'string' ? batch.printedAt : '',
+              origin: 'migrated-inferred',
+            })
+          }
+        }
+
+        if (firstRevisions.length > 0) {
+          await transaction.table('blockRevisions').bulkAdd(firstRevisions)
+        }
+        if (inferredRuns.length > 0) {
+          await transaction.table('printRuns').bulkAdd(inferredRuns)
         }
       })
   }
@@ -84,25 +202,25 @@ const drafts: Draft[] = [
 ]
 
 const blocks: Block[] = [
-  { id: 'block-ms-01', draftId: 'draft-menshen-qin', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 18, carvedBy: '齐师傅', state: '已刻成', defectNote: '胡须末梢修补一处，不影响线条落墨。' },
-  { id: 'block-ms-02', draftId: 'draft-menshen-qin', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 20, carvedBy: '周桂枝', state: '在刻', defectNote: '甲胄边线有一处浅崩口，已做嵌补。' },
-  { id: 'block-ms-03', draftId: 'draft-menshen-qin', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 20, carvedBy: '陈小满', state: '待刻', defectNote: '' },
-  { id: 'block-ms-04', draftId: 'draft-menshen-qin', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 19, carvedBy: '秦木生', state: '待刻', defectNote: '' },
+  { id: 'block-ms-01', draftId: 'draft-menshen-qin', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 18, carvedBy: '齐师傅', state: '已刻成', defectNote: '胡须末梢修补一处，不影响线条落墨。', currentRevNo: 2 },
+  { id: 'block-ms-02', draftId: 'draft-menshen-qin', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 20, carvedBy: '周桂枝', state: '在刻', defectNote: '甲胄边线有一处浅崩口，已做嵌补。', currentRevNo: 1 },
+  { id: 'block-ms-03', draftId: 'draft-menshen-qin', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 20, carvedBy: '陈小满', state: '待刻', defectNote: '', currentRevNo: 1 },
+  { id: 'block-ms-04', draftId: 'draft-menshen-qin', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 19, carvedBy: '秦木生', state: '待刻', defectNote: '', currentRevNo: 1 },
 
-  { id: 'block-zw-01', draftId: 'draft-zaowang-siming', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 16, carvedBy: '秦木生', state: '已刻成', defectNote: '灶君衣纹清晰，无补版。' },
-  { id: 'block-zw-02', draftId: 'draft-zaowang-siming', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 18, carvedBy: '周桂枝', state: '在刻', defectNote: '供桌纹样局部跳刀，已顺线修平。' },
-  { id: 'block-zw-03', draftId: 'draft-zaowang-siming', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 18, carvedBy: '陈小满', state: '待刻', defectNote: '' },
-  { id: 'block-zw-04', draftId: 'draft-zaowang-siming', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 17, carvedBy: '秦木生', state: '待刻', defectNote: '' },
+  { id: 'block-zw-01', draftId: 'draft-zaowang-siming', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 16, carvedBy: '秦木生', state: '已刻成', defectNote: '灶君衣纹清晰，无补版。', currentRevNo: 1 },
+  { id: 'block-zw-02', draftId: 'draft-zaowang-siming', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 18, carvedBy: '周桂枝', state: '在刻', defectNote: '供桌纹样局部跳刀，已顺线修平。', currentRevNo: 1 },
+  { id: 'block-zw-03', draftId: 'draft-zaowang-siming', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 18, carvedBy: '陈小满', state: '待刻', defectNote: '', currentRevNo: 1 },
+  { id: 'block-zw-04', draftId: 'draft-zaowang-siming', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 17, carvedBy: '秦木生', state: '待刻', defectNote: '', currentRevNo: 1 },
 
-  { id: 'block-mk-01', draftId: 'draft-muke-zhai', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 17, carvedBy: '齐师傅', state: '在刻', defectNote: '旗面转折处留刀待修。' },
-  { id: 'block-mk-02', draftId: 'draft-muke-zhai', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 20, carvedBy: '周桂枝', state: '待刻', defectNote: '' },
-  { id: 'block-mk-03', draftId: 'draft-muke-zhai', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 20, carvedBy: '陈小满', state: '待刻', defectNote: '' },
-  { id: 'block-mk-04', draftId: 'draft-muke-zhai', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 19, carvedBy: '秦木生', state: '待刻', defectNote: '' },
+  { id: 'block-mk-01', draftId: 'draft-muke-zhai', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 17, carvedBy: '齐师傅', state: '在刻', defectNote: '旗面转折处留刀待修。', currentRevNo: 1 },
+  { id: 'block-mk-02', draftId: 'draft-muke-zhai', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 20, carvedBy: '周桂枝', state: '待刻', defectNote: '', currentRevNo: 1 },
+  { id: 'block-mk-03', draftId: 'draft-muke-zhai', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 20, carvedBy: '陈小满', state: '待刻', defectNote: '', currentRevNo: 1 },
+  { id: 'block-mk-04', draftId: 'draft-muke-zhai', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 19, carvedBy: '秦木生', state: '待刻', defectNote: '', currentRevNo: 1 },
 
-  { id: 'block-ll-01', draftId: 'draft-liannian-youyu', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 16, carvedBy: '齐师傅', state: '已修版', defectNote: '鱼鳞线加修一次，边缘改圆顺。' },
-  { id: 'block-ll-02', draftId: 'draft-liannian-youyu', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 18, carvedBy: '周桂枝', state: '已刻成', defectNote: '荷叶边缘有针尖小孔，不影响印面。' },
-  { id: 'block-ll-03', draftId: 'draft-liannian-youyu', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 18, carvedBy: '陈小满', state: '已刻成', defectNote: '无补版。' },
-  { id: 'block-ll-04', draftId: 'draft-liannian-youyu', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 18, carvedBy: '秦木生', state: '已刻成', defectNote: '青绿地留白平净。' },
+  { id: 'block-ll-01', draftId: 'draft-liannian-youyu', blockName: '墨线版', colorNo: 1, woodType: '黄杨', thicknessMm: 16, carvedBy: '齐师傅', state: '已修版', defectNote: '鱼鳞线加修一次，边缘改圆顺。', currentRevNo: 2 },
+  { id: 'block-ll-02', draftId: 'draft-liannian-youyu', blockName: '黄版', colorNo: 2, woodType: '梨木', thicknessMm: 18, carvedBy: '周桂枝', state: '已刻成', defectNote: '荷叶边缘有针尖小孔，不影响印面。', currentRevNo: 1 },
+  { id: 'block-ll-03', draftId: 'draft-liannian-youyu', blockName: '红版', colorNo: 3, woodType: '梨木', thicknessMm: 18, carvedBy: '陈小满', state: '已刻成', defectNote: '无补版。', currentRevNo: 1 },
+  { id: 'block-ll-04', draftId: 'draft-liannian-youyu', blockName: '绿版', colorNo: 4, woodType: '梨木', thicknessMm: 18, carvedBy: '秦木生', state: '已刻成', defectNote: '青绿地留白平净。', currentRevNo: 1 },
 ]
 
 const carvers: Carver[] = [
@@ -177,50 +295,185 @@ const batches: PrintBatch[] = [
 ]
 
 const nodes: ProcessNode[] = [
-  { id: 'node-ms-01', blockId: 'block-ms-01', stage: '起稿', seq: 1, operator: '赵守艺', startedAt: '2026-01-02T08:30', durationMin: 180, note: '确定秦琼、敬德左右对称构图。' },
-  { id: 'node-ms-02', blockId: 'block-ms-01', stage: '勾描', seq: 2, operator: '赵守艺', startedAt: '2026-01-03T09:00', durationMin: 240, note: '墨线稿过朱，甲片分界加密。' },
-  { id: 'node-ms-03', blockId: 'block-ms-01', stage: '上样', seq: 3, operator: '齐师傅', startedAt: '2026-01-04T08:30', durationMin: 95, note: '画稿反贴黄杨板，糨层均匀。' },
-  { id: 'node-ms-04', blockId: 'block-ms-01', stage: '刻版', seq: 4, operator: '齐师傅', startedAt: '2026-01-05T07:50', durationMin: 760, note: '人物面部先刻，衣纹随后分层推进。' },
-  { id: 'node-ms-05', blockId: 'block-ms-01', stage: '修版', seq: 5, operator: '秦木生', startedAt: '2026-01-09T13:20', durationMin: 130, note: '补胡须末梢，试印后调整两处刀口。' },
-  { id: 'node-zw-01', blockId: 'block-zw-01', stage: '起稿', seq: 1, operator: '韩玉芹', startedAt: '2026-01-12T08:20', durationMin: 170, note: '按灶王传统形制布置神位与供养人物。' },
-  { id: 'node-zw-02', blockId: 'block-zw-01', stage: '勾描', seq: 2, operator: '韩玉芹', startedAt: '2026-01-13T08:40', durationMin: 210, note: '整理胡须与云纹，减少密线交叠。' },
-  { id: 'node-zw-03', blockId: 'block-zw-01', stage: '上样', seq: 3, operator: '秦木生', startedAt: '2026-01-14T09:10', durationMin: 85, note: '画稿上板，四角定位。' },
-  { id: 'node-zw-04', blockId: 'block-zw-01', stage: '刻版', seq: 4, operator: '秦木生', startedAt: '2026-01-15T07:40', durationMin: 690, note: '先刻神像轮廓，再收桌面直线。' },
-  { id: 'node-mk-01', blockId: 'block-mk-01', stage: '起稿', seq: 1, operator: '岳文山', startedAt: '2026-02-01T09:00', durationMin: 200, note: '选取穆桂英点将一幕，突出旗阵。' },
-  { id: 'node-mk-02', blockId: 'block-mk-01', stage: '勾描', seq: 2, operator: '岳文山', startedAt: '2026-02-02T08:30', durationMin: 185, note: '戏台身段转为年画正面构图。' },
-  { id: 'node-mk-03', blockId: 'block-mk-01', stage: '上样', seq: 3, operator: '齐师傅', startedAt: '2026-02-03T08:20', durationMin: 90, note: '旗面折线以淡朱定位。' },
-  { id: 'node-ll-01', blockId: 'block-ll-01', stage: '刻版', seq: 1, operator: '齐师傅', startedAt: '2025-12-08T08:00', durationMin: 620, note: '娃娃轮廓与抱鱼线条一次成版。' },
-  { id: 'node-ll-02', blockId: 'block-ll-01', stage: '修版', seq: 2, operator: '秦木生', startedAt: '2025-12-11T14:00', durationMin: 110, note: '鱼鳞线加修，边缘改圆顺。' },
+  { id: 'node-ms-01', blockId: 'block-ms-01', revNo: 1, stage: '起稿', seq: 1, operator: '赵守艺', startedAt: '2026-01-02T08:30', durationMin: 180, note: '确定秦琼、敬德左右对称构图。' },
+  { id: 'node-ms-02', blockId: 'block-ms-01', revNo: 1, stage: '勾描', seq: 2, operator: '赵守艺', startedAt: '2026-01-03T09:00', durationMin: 240, note: '墨线稿过朱，甲片分界加密。' },
+  { id: 'node-ms-03', blockId: 'block-ms-01', revNo: 1, stage: '上样', seq: 3, operator: '齐师傅', startedAt: '2026-01-04T08:30', durationMin: 95, note: '画稿反贴黄杨板，糨层均匀。' },
+  { id: 'node-ms-04', blockId: 'block-ms-01', revNo: 1, stage: '刻版', seq: 4, operator: '齐师傅', startedAt: '2026-01-05T07:50', durationMin: 760, note: '人物面部先刻，衣纹随后分层推进。' },
+  { id: 'node-ms-05', blockId: 'block-ms-01', revNo: 2, stage: '修版', seq: 5, operator: '秦木生', startedAt: '2026-01-09T13:20', durationMin: 130, note: '补胡须末梢，试印后调整两处刀口。' },
+  { id: 'node-zw-01', blockId: 'block-zw-01', revNo: 1, stage: '起稿', seq: 1, operator: '韩玉芹', startedAt: '2026-01-12T08:20', durationMin: 170, note: '按灶王传统形制布置神位与供养人物。' },
+  { id: 'node-zw-02', blockId: 'block-zw-01', revNo: 1, stage: '勾描', seq: 2, operator: '韩玉芹', startedAt: '2026-01-13T08:40', durationMin: 210, note: '整理胡须与云纹，减少密线交叠。' },
+  { id: 'node-zw-03', blockId: 'block-zw-01', revNo: 1, stage: '上样', seq: 3, operator: '秦木生', startedAt: '2026-01-14T09:10', durationMin: 85, note: '画稿上板，四角定位。' },
+  { id: 'node-zw-04', blockId: 'block-zw-01', revNo: 1, stage: '刻版', seq: 4, operator: '秦木生', startedAt: '2026-01-15T07:40', durationMin: 690, note: '先刻神像轮廓，再收桌面直线。' },
+  { id: 'node-mk-01', blockId: 'block-mk-01', revNo: 1, stage: '起稿', seq: 1, operator: '岳文山', startedAt: '2026-02-01T09:00', durationMin: 200, note: '选取穆桂英点将一幕，突出旗阵。' },
+  { id: 'node-mk-02', blockId: 'block-mk-01', revNo: 1, stage: '勾描', seq: 2, operator: '岳文山', startedAt: '2026-02-02T08:30', durationMin: 185, note: '戏台身段转为年画正面构图。' },
+  { id: 'node-mk-03', blockId: 'block-mk-01', revNo: 1, stage: '上样', seq: 3, operator: '齐师傅', startedAt: '2026-02-03T08:20', durationMin: 90, note: '旗面折线以淡朱定位。' },
+  { id: 'node-ll-01', blockId: 'block-ll-01', revNo: 1, stage: '刻版', seq: 1, operator: '齐师傅', startedAt: '2025-12-08T08:00', durationMin: 620, note: '娃娃轮廓与抱鱼线条一次成版。' },
+  { id: 'node-ll-02', blockId: 'block-ll-01', revNo: 2, stage: '修版', seq: 2, operator: '秦木生', startedAt: '2025-12-11T14:00', durationMin: 110, note: '鱼鳞线加修，边缘改圆顺。' },
 ]
 
-function withSchemaRevision<T extends object>(records: T[]): Array<T & { schemaRev: number }> {
-  return records.map((record) => ({ ...record, schemaRev: 2 }))
+interface SeedRevision {
+  blockId: string
+  createdAt: string
+  repairReason: string
+  note: string
 }
 
-export const db = new WoodprintDatabase()
+const repairs: SeedRevision[] = [
+  {
+    blockId: 'block-ms-01',
+    createdAt: '2026-01-09T13:20',
+    repairReason: '试印发现胡须末梢两处刀口吃墨不足，需补线并收顺刀口。',
+    note: '补胡须末梢，试印后调整两处刀口。',
+  },
+  {
+    blockId: 'block-ll-01',
+    createdAt: '2025-12-11T14:00',
+    repairReason: '鱼鳞线过密且边缘生硬，加修刀口让边缘圆顺。',
+    note: '鱼鳞线加修，边缘改圆顺。',
+  },
+]
 
-db.on('populate', () => {
-  return Promise.all([
-    db.drafts.bulkAdd(withSchemaRevision(drafts)),
-    db.blocks.bulkAdd(withSchemaRevision(blocks)),
-    db.carvers.bulkAdd(withSchemaRevision(carvers)),
-    db.batches.bulkAdd(withSchemaRevision(batches)),
-    db.nodes.bulkAdd(withSchemaRevision(nodes)),
-  ])
-})
+function buildBlockRevisions(): BlockRevision[] {
+  const revisionList: BlockRevision[] = []
+  for (const block of blocks) {
+    const blockNodes = nodes.filter((node) => node.blockId === block.id)
+    const firstNode = [...blockNodes].sort((a, b) => a.startedAt.localeCompare(b.startedAt))[0]
+    revisionList.push({
+      id: `rev-${block.id}-001`,
+      blockId: block.id,
+      revNo: 1,
+      origin: 'initial',
+      operator: block.carvedBy || '未知',
+      createdAt: firstNode?.startedAt ?? '',
+      note: '首刻建档。',
+      repairReason: '',
+      woodReplaced: false,
+      previousWoodType: null,
+      snapshot: {
+        blockName: block.blockName,
+        colorNo: block.colorNo,
+        woodType: block.woodType,
+        thicknessMm: block.thicknessMm,
+        carvedBy: block.carvedBy,
+        state: block.currentRevNo > 1 ? '已刻成' : block.state,
+        defectNote: '',
+      },
+    })
+
+    const repair = repairs.find((item) => item.blockId === block.id)
+    if (block.currentRevNo >= 2 && repair) {
+      revisionList.push({
+        id: `rev-${block.id}-002`,
+        blockId: block.id,
+        revNo: 2,
+        origin: 'repair',
+        operator: '秦木生',
+        createdAt: repair.createdAt,
+        note: repair.note,
+        repairReason: repair.repairReason,
+        woodReplaced: false,
+        previousWoodType: block.woodType,
+        snapshot: {
+          blockName: block.blockName,
+          colorNo: block.colorNo,
+          woodType: block.woodType,
+          thicknessMm: block.thicknessMm,
+          carvedBy: block.carvedBy,
+          state: block.state,
+          defectNote: block.defectNote,
+        },
+      })
+    }
+  }
+  return revisionList
+}
+
+const runDeviations: Record<string, Record<string, string>> = {
+  'batch-ll-001': {
+    'block-ll-01': '线条饱满',
+    'block-ll-02': '右下荷叶略轻',
+    'block-ll-03': '娃娃衣襟套准',
+    'block-ll-04': '未见走版',
+  },
+  'batch-ll-002': {
+    'block-ll-01': '清晰',
+    'block-ll-02': '套准',
+    'block-ll-03': '左肩偏差约半线',
+    'block-ll-04': '荷叶边略重',
+  },
+  'batch-ms-001': {
+    'block-ms-01': '样张无断线',
+    'block-ms-02': '肩甲外侧出现轻微走版，已重校定位',
+  },
+}
+
+function buildPrintRuns(): PrintRun[] {
+  const runList: PrintRun[] = []
+  for (const batch of batches) {
+    for (const block of blocks.filter((item) => item.draftId === batch.draftId)) {
+      const revCount = block.currentRevNo
+      runList.push({
+        id: `run-${batch.id}-${block.id}`,
+        batchId: batch.id,
+        draftId: batch.draftId,
+        blockId: block.id,
+        blockName: block.blockName,
+        colorNo: block.colorNo,
+        // 试印时间早于改刀的批次按首版落印留档；其余照当时版次。
+        revNo: batch.printedAt < '2026-01-10' && revCount > 1 ? 1 : revCount,
+        pieceCount: batch.pieceCount,
+        deviation: runDeviations[batch.id]?.[block.id] ?? '',
+        operator: '未知',
+        printedAt: batch.printedAt,
+        origin: 'registered',
+      })
+    }
+  }
+  return runList
+}
+
+function withSchemaRevision<T extends object>(records: T[]): Array<T & { schemaRev: number }> {
+  return records.map((record) => ({ ...record, schemaRev: SCHEMA_REVISION }))
+}
+
+export function createDatabase(name?: string): WoodprintDatabase {
+  const database = new WoodprintDatabase(name)
+
+  database.on('populate', () => {
+    return Promise.all([
+      database.drafts.bulkAdd(withSchemaRevision(drafts)),
+      database.blocks.bulkAdd(withSchemaRevision(blocks)),
+      database.carvers.bulkAdd(withSchemaRevision(carvers)),
+      database.batches.bulkAdd(withSchemaRevision(batches)),
+      database.nodes.bulkAdd(withSchemaRevision(nodes)),
+      database.blockRevisions.bulkAdd(buildBlockRevisions()),
+      database.printRuns.bulkAdd(buildPrintRuns()),
+    ])
+  })
+
+  return database
+}
+
+export const db = createDatabase()
 
 export async function initializeDatabase(): Promise<void> {
   await db.open()
   const draftCount = await db.drafts.count()
   if (draftCount > 0) return
 
-  await db.transaction('rw', db.drafts, db.blocks, db.carvers, db.batches, db.nodes, async () => {
-    await db.drafts.bulkPut(withSchemaRevision(drafts))
-    await db.blocks.bulkPut(withSchemaRevision(blocks))
-    await db.carvers.bulkPut(withSchemaRevision(carvers))
-    await db.batches.bulkPut(withSchemaRevision(batches))
-    await db.nodes.bulkPut(withSchemaRevision(nodes))
-  })
+  await db.transaction(
+    'rw',
+    [db.drafts, db.blocks, db.carvers, db.batches, db.nodes, db.blockRevisions, db.printRuns],
+    async () => {
+      await db.drafts.bulkPut(withSchemaRevision(drafts))
+      await db.blocks.bulkPut(withSchemaRevision(blocks))
+      await db.carvers.bulkPut(withSchemaRevision(carvers))
+      await db.batches.bulkPut(withSchemaRevision(batches))
+      await db.nodes.bulkPut(withSchemaRevision(nodes))
+      await db.blockRevisions.bulkPut(buildBlockRevisions())
+      await db.printRuns.bulkPut(buildPrintRuns())
+    },
+  )
 }
 
-export type { WoodprintDatabase }
+export type { WoodprintDatabase as WoodprintDatabaseType }

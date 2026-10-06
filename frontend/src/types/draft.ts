@@ -9,4 +9,5 @@ export interface Draft {
   sizeCm: string
   paperNote: string
   status: DraftStatus
+  schemaRev?: number
 }

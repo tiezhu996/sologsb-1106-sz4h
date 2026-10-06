@@ -1,5 +1,6 @@
 import { derived, writable } from 'svelte/store'
-import type { Block } from '../types/block'
+import type { Block, BlockName, BlockState, WoodType } from '../types/block'
+import type { BlockRevision } from '../types/revision'
 import { db } from '../utils/db'
 
 const blockList = writable<Block[]>([])
@@ -28,9 +29,52 @@ async function load(): Promise<void> {
   blockList.set(records)
 }
 
-async function create(input: Omit<Block, 'id'>): Promise<string> {
+/** 新建一块待刻版，并同时建立它的首个版次（首刻建档）。 */
+async function createWithInitialRevision(input: {
+  draftId: string
+  blockName: BlockName
+  colorNo: number
+  woodType: WoodType
+  thicknessMm: number
+}): Promise<string> {
   const id = `block-${crypto.randomUUID()}`
-  await db.blocks.add({ id, ...input })
+  const block: Block = {
+    id,
+    draftId: input.draftId,
+    blockName: input.blockName,
+    colorNo: input.colorNo,
+    woodType: input.woodType,
+    thicknessMm: input.thicknessMm,
+    carvedBy: '',
+    state: '待刻',
+    defectNote: '',
+    currentRevNo: 1,
+  }
+  const revision: BlockRevision = {
+    id: `rev-${crypto.randomUUID()}`,
+    blockId: id,
+    revNo: 1,
+    origin: 'initial',
+    operator: '未知',
+    createdAt: '',
+    note: '首刻建档。',
+    repairReason: '',
+    woodReplaced: false,
+    previousWoodType: null,
+    snapshot: {
+      blockName: block.blockName,
+      colorNo: block.colorNo,
+      woodType: block.woodType,
+      thicknessMm: block.thicknessMm,
+      carvedBy: '',
+      state: '待刻',
+      defectNote: '',
+    },
+  }
+  await db.transaction('rw', db.blocks, db.blockRevisions, async () => {
+    await db.blocks.add(block)
+    await db.blockRevisions.add(revision)
+  })
   await load()
   return id
 }
@@ -58,7 +102,7 @@ export const blockStore = {
   subscribe: blockList.subscribe,
   statsByDraft,
   load,
-  create,
+  createWithInitialRevision,
   update,
   reorder,
   removeByDraft,

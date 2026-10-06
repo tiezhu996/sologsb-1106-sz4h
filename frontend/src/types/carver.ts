@@ -8,4 +8,5 @@ export interface Carver {
   skillLevel: SkillLevel
   activeBlockIds: string[]
   pieceworkNote: string
+  schemaRev?: number
 }
