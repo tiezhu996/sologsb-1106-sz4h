@@ -1185,3 +1185,217 @@ textarea:focus {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ===== 追加式版次：返修表单、版次链、批次复核 ===== */
+
+.revision-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.rev-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.22rem 0.6rem;
+  background: #efe4d0;
+  color: var(--cinnabar-dark);
+  font-size: 0.7rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.rev-chain {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+  min-width: 20rem;
+}
+
+.rev-chain li {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.7rem;
+  background: var(--paper);
+  display: grid;
+  gap: 0.25rem;
+}
+
+.rev-chain li.rev-current {
+  border-left-color: var(--cinnabar);
+  background: #fdf3ee;
+}
+
+.rev-chain-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.rev-chain-head strong {
+  font-size: 0.82rem;
+}
+
+.rev-chain p {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
+.rev-chain small {
+  color: var(--ink-muted);
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+
+.repair-panel {
+  margin-top: 1.25rem;
+  border-left: 4px solid var(--cinnabar);
+}
+
+.batch-item.pending-review {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold) inset;
+}
+
+.impression-panel {
+  margin: -0.35rem 0 0.4rem;
+}
+
+.impression-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.8rem;
+}
+
+.impression-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.8rem;
+  background: var(--paper);
+  display: grid;
+  gap: 0.3rem;
+  align-content: start;
+}
+
+.impression-card.is-pending {
+  border-color: var(--gold);
+  background: #fdf6e9;
+}
+
+.impression-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.impression-head span {
+  font-size: 0.74rem;
+  color: var(--ink-muted);
+}
+
+.impression-card p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
+.impression-card small {
+  font-size: 0.68rem;
+  color: var(--ink-muted);
+}
+
+.restrike-card {
+  margin-top: 0.35rem;
+  border: 1px dashed var(--jade);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.6rem;
+  background: #eef6f1;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.restrike-card strong {
+  font-size: 0.76rem;
+  color: var(--jade);
+}
+
+.restrike-card p {
+  font-size: 0.76rem;
+}
+
+.restrike-card small {
+  color: var(--ink-muted);
+}
+
+.review-keep {
+  color: var(--jade) !important;
+  font-weight: 700;
+}
+
+.review-block-list {
+  display: grid;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.review-block {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 0.8rem 0.9rem;
+  background: var(--paper);
+  display: grid;
+  gap: 0.55rem;
+}
+
+.review-block-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.review-block-head span {
+  font-size: 0.78rem;
+  color: var(--ink-muted);
+}
+
+.review-choice {
+  display: flex;
+  gap: 1.2rem;
+}
+
+.review-choice label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.restrike-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.restrike-form .wide {
+  grid-column: 1 / -1;
+}
+
+.restrike-form .gentle-copy {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.74rem;
+}

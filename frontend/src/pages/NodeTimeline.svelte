@@ -67,6 +67,7 @@
       startedAt: new Date().toISOString().slice(0, 16),
       durationMin: Math.max(0, Number(durationMin)),
       note: note.trim() || `${nextStage}工序登记`,
+      revisionNo: block.currentRevisionNo ?? 1,
     })
     note = ''
     feedback = `已推进到${nextStage}`
@@ -124,7 +125,7 @@
     <div>
       <p class="eyebrow">单块版片工序</p>
       <h1>{block.blockName}工序节点时间线</h1>
-      <p>{block.woodType} · 版厚 {block.thicknessMm} mm · 当前 {block.state}</p>
+      <p>{block.woodType} · 版厚 {block.thicknessMm} mm · 当前第 {block.currentRevisionNo} 版次 · {block.state}</p>
     </div>
     <a class="button ghost" use:link href={`/drafts/${block.draftId}/blocks`}>返回版片编排台</a>
   </div>
@@ -193,7 +194,7 @@
             <li>
               <span class="timeline-dot"></span>
               <div>
-                <div class="timeline-title"><strong>{node.stage}</strong><span>第 {node.seq} 节点</span></div>
+                <div class="timeline-title"><strong>{node.stage}</strong><span>第 {node.seq} 节点{node.revisionNo ? ` · 第 ${node.revisionNo} 版次` : ' · 版次未知（旧档）'}</span></div>
                 <p>{node.note}</p>
                 <small>{node.operator} · {formatTime(node.startedAt)} · {node.durationMin} 分钟</small>
               </div>

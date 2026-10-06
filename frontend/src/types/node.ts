@@ -10,4 +10,6 @@ export interface ProcessNode {
   startedAt: string
   durationMin: number
   note: string
+  /** 登记节点时该版所处的版次号；旧节点升级时按返修节点回溯，无法判定为 null */
+  revisionNo: number | null
 }

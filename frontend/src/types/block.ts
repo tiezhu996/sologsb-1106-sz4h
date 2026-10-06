@@ -12,4 +12,6 @@ export interface Block {
   carvedBy: string
   state: BlockState
   defectNote: string
+  /** 当前版次号，指向 revisions 中该块版的最新追加记录 */
+  currentRevisionNo: number
 }

@@ -9,12 +9,15 @@
   import { blockStore } from '../stores/blockStore'
   import { carverStore } from '../stores/carverStore'
   import { draftStore } from '../stores/draftStore'
+  import { revisionStore } from '../stores/revisionStore'
+  import { appendRepairRevision, RevisionConflictError } from '../services/ledger'
   import { useBlockOrder } from '../hooks/useBlockOrder'
   import { useCarverLoad } from '../hooks/useCarverLoad'
   import { validateColorSequence } from '../utils/seq'
   import { db } from '../utils/db'
   import type { Block } from '../types/block'
   import type { ProcessStage } from '../types/node'
+  import type { ReplacedWood } from '../types/revision'
 
   const draftId = $derived($params?.id ?? '')
   const {
@@ -31,10 +34,75 @@
   let notice = $state('')
   let lastSync = $state('刚刚')
 
+  // 返修版次表单（一次只展开一块版）
+  let repairBlockId = $state<string | null>(null)
+  let repairExpectedNo = $state(1)
+  let repairReason = $state('')
+  let repairWood = $state<ReplacedWood>('未换料')
+  let repairOperator = $state('')
+  let repairNote = $state('')
+  let repairMessage = $state('')
+  let repairSubmitting = $state(false)
+  let expandedHistoryId = $state<string | null>(null)
+
+  const woodOptions: ReplacedWood[] = ['未换料', '梨木', '黄杨', '未知']
+
+  function revisionsOf(blockId: string) {
+    return $revisionStore.filter((revision) => revision.blockId === blockId).sort((a, b) => a.revisionNo - b.revisionNo)
+  }
+
+  function formatRevisionTime(value: string): string {
+    return value ? value.replace('T', ' ').slice(0, 16) : '未知（旧档缺失）'
+  }
+
+  function openRepairForm(block: Block): void {
+    repairBlockId = block.id
+    repairExpectedNo = (block.currentRevisionNo ?? 1) + 1
+    repairReason = ''
+    repairWood = '未换料'
+    repairOperator = block.carvedBy
+    repairNote = ''
+    repairMessage = ''
+  }
+
+  async function submitRepair(): Promise<void> {
+    if (!repairBlockId) return
+    if (!repairReason.trim()) {
+      repairMessage = '请先填写改刀原因，再追加版次。'
+      return
+    }
+    repairSubmitting = true
+    repairMessage = ''
+    try {
+      const revision = await appendRepairRevision({
+        blockId: repairBlockId,
+        expectedRevisionNo: repairExpectedNo,
+        reason: repairReason,
+        replacedWood: repairWood,
+        operator: repairOperator.trim() || '当班修版工',
+        note: repairNote,
+      })
+      await Promise.all([blockStore.load(), revisionStore.load(), carverStore.load()])
+      const target = $orderedBlocks.find((item) => item.id === repairBlockId)
+      notice = `${target?.blockName ?? '版片'}已追加第 ${revision.revisionNo} 版次，旧批次已进入待复核`
+      repairBlockId = null
+      expandedHistoryId = revision.blockId
+    } catch (error) {
+      repairMessage =
+        error instanceof RevisionConflictError
+          ? error.message
+          : error instanceof Error
+            ? `写入失败，整笔已回滚：${error.message}`
+            : '写入失败，整笔已回滚，请重试。'
+    } finally {
+      repairSubmitting = false
+    }
+  }
+
   const draft = $derived($draftStore.find((item) => item.id === draftId) ?? null)
 
   onMount(() => {
-    void Promise.all([draftStore.load(), blockStore.load(), carverStore.load()])
+    void Promise.all([draftStore.load(), blockStore.load(), carverStore.load(), revisionStore.load()])
   })
 
   $effect(() => {
@@ -90,6 +158,7 @@
       startedAt: new Date().toISOString().slice(0, 16),
       durationMin: 0,
       note: '版片验线后标记刻成。',
+      revisionNo: block.currentRevisionNo ?? 1,
     })
     lastSync = `${block.blockName}已标记刻成`
   }
@@ -171,7 +240,7 @@
     <div><span>版片总数</span><strong>{$orderedBlocks.length}</strong></div>
     <div><span>刻成率</span><strong>{$blockCarvedRate}%</strong></div>
     <div><span>在刻版片</span><strong>{$orderedBlocks.filter((block) => block.state === '在刻').length}</strong></div>
-    <div><span>需修版片</span><strong>{$orderedBlocks.filter((block) => block.defectNote).length}</strong></div>
+    <div><span>返修版次总数</span><strong>{$revisionStore.filter((revision) => revision.kind === '返修').length}</strong></div>
   </section>
 
   <div class="workbench-grid">
@@ -196,7 +265,7 @@
                 <th>木料 / 版厚</th>
                 <th>刻工指派</th>
                 <th>状态</th>
-                <th>崩口与修补</th>
+                <th>崩口留痕与返修版次</th>
               </tr>
             </thead>
             <tbody>
@@ -247,9 +316,41 @@
                       data-testid={`field-defectNote-${block.id}`}
                       rows="2"
                       bind:value={defectDraft[block.id]}
-                      placeholder="崩口、补线或嵌木说明"
+                      placeholder="崩口观察留痕；改刀返修请走下方追加版次，不覆盖老记录"
                     ></textarea>
-                    <button class="mini-button" type="button" onclick={() => saveDefect(block)}>存记录</button>
+                    <button class="mini-button" type="button" onclick={() => saveDefect(block)}>存留痕</button>
+                    <div class="revision-cell">
+                      <span class="rev-badge" data-testid={`rev-badge-${block.id}`}>当前第 {block.currentRevisionNo} 版次</span>
+                      <button
+                        class="mini-button strong"
+                        data-testid={`open-repair-${block.id}`}
+                        type="button"
+                        onclick={() => openRepairForm(block)}
+                      >
+                        追加返修版次
+                      </button>
+                      <button class="mini-button" type="button" onclick={() => (expandedHistoryId = expandedHistoryId === block.id ? null : block.id)}>
+                        {expandedHistoryId === block.id ? '收起版次链' : '查看版次链'}
+                      </button>
+                    </div>
+                    {#if expandedHistoryId === block.id}
+                      <ol class="rev-chain" data-testid={`rev-chain-${block.id}`}>
+                        {#each revisionsOf(block.id) as revision (revision.id)}
+                          <li class:rev-current={revision.revisionNo === block.currentRevisionNo}>
+                            <div class="rev-chain-head">
+                              <strong>第 {revision.revisionNo} 版次 · {revision.kind}</strong>
+                              <span class="tag">{revision.origin}</span>
+                            </div>
+                            <p>{revision.reason}</p>
+                            <small>
+                              {revision.operator || '操作人未知'} · {formatRevisionTime(revision.createdAt)} ·
+                              换木料：{revision.replacedWood} ·
+                              版片摘要：{revision.snapshot.woodType} {revision.snapshot.thicknessMm}mm / {revision.snapshot.state}
+                            </small>
+                          </li>
+                        {/each}
+                      </ol>
+                    {/if}
                   </td>
                 </tr>
                 <tr class="stage-row">
@@ -296,4 +397,49 @@
       <a class="button secondary full" use:link href="/carvers">查看刻工档与分布</a>
     </aside>
   </div>
+
+  {#if repairBlockId}
+    {@const repairBlock = $orderedBlocks.find((item) => item.id === repairBlockId)}
+    <section class="panel form-panel repair-panel" data-testid="form-repair">
+      <div class="panel-heading">
+        <div>
+          <span class="section-kicker">追加式返修</span>
+          <h2>
+            为{repairBlock?.blockName ?? '版片'}追加第 {(repairBlock?.currentRevisionNo ?? 1) + 1} 版次
+          </h2>
+          <p class="gentle-copy">本次认领第 {repairExpectedNo} 版次；旧节点、旧批次与当时版片摘要保留在原处，不用新状态覆盖；提交后用到本版的已登记批次进入待复核。若另一标签页已先行提交，本笔会被拒绝并提示刷新。</p>
+        </div>
+        <button class="text-button" type="button" onclick={() => (repairBlockId = null)}>取消</button>
+      </div>
+
+      <div class="form-grid three">
+        <label class="wide">
+          <span>改刀原因</span>
+          <textarea data-testid="field-repair-reason" rows="2" bind:value={repairReason} placeholder="如：胡须线崩口三寸，顺线重刻并加深半刀"></textarea>
+        </label>
+        <label>
+          <span>换用木料</span>
+          <select data-testid="field-repair-wood" bind:value={repairWood}>
+            {#each woodOptions as option}<option value={option}>{option}</option>{/each}
+          </select>
+        </label>
+        <label>
+          <span>修版操作人</span>
+          <input data-testid="field-repair-operator" bind:value={repairOperator} placeholder="修版师傅姓名" />
+        </label>
+        <label class="wide">
+          <span>工序备注（可空，默认同改刀原因）</span>
+          <input data-testid="field-repair-note" bind:value={repairNote} placeholder="同时留一条「修版」工序节点" />
+        </label>
+      </div>
+
+      {#if repairMessage}<p class="form-message" data-testid="repair-message">{repairMessage}</p>{/if}
+      <div class="form-actions">
+        <button class="button primary" data-testid="submit-repair" type="button" disabled={repairSubmitting} onclick={submitRepair}>
+          {repairSubmitting ? '提交中…' : '追加版次'}
+        </button>
+        <button class="button ghost" type="button" disabled={repairSubmitting} onclick={() => (repairBlockId = null)}>取消</button>
+      </div>
+    </section>
+  {/if}
 {/if}

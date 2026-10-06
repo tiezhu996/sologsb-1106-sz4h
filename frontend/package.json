@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json --threshold error",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify:ledger": "node --import tsx --import ./verify/preload.ts verify/ledger.test.ts",
+    "verify:migration": "node --import tsx --import ./verify/preload.ts verify/migration.test.ts",
+    "verify": "npm run verify:ledger && npm run verify:migration"
   },
   "dependencies": {
     "dexie": "^4.0.8",
@@ -17,7 +20,9 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "@tsconfig/svelte": "^5.0.4",
+    "fake-indexeddb": "6.2.5",
     "svelte-check": "^4.0.5",
+    "tsx": "4.23.15",
     "typescript": "^5.6.2",
     "vite": "^5.4.8"
   }

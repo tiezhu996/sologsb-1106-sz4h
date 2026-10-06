@@ -6,7 +6,9 @@
   import { draftStore } from '../stores/draftStore'
   import { blockStore } from '../stores/blockStore'
   import { useBlockOrder } from '../hooks/useBlockOrder'
+  import { createInitialRevision } from '../services/ledger'
   import type { DraftGenre, DraftStatus, Draft } from '../types/draft'
+  import type { Block } from '../types/block'
   import type { PrintBatch } from '../types/batch'
   import { db } from '../utils/db'
 
@@ -79,21 +81,26 @@
     })
 
     const baseColorNames = ['墨线版', '黄版', '红版', '绿版'] as const
-    await db.transaction('rw', db.blocks, async () => {
+    const woodByColor = ['黄杨', '梨木', '梨木', '梨木'] as const
+    await db.transaction('rw', [db.blocks, db.revisions], async () => {
       for (let index = 0; index < baseColorNames.length; index += 1) {
         const blockName = baseColorNames[index]
         if (!blockName) continue
-        await db.blocks.add({
+        const newBlock: Block = {
           id: `block-${crypto.randomUUID()}`,
           draftId: id,
           blockName,
           colorNo: index + 1,
-          woodType: index === 0 ? '黄杨' : '梨木',
+          woodType: woodByColor[index] ?? '梨木',
           thicknessMm: index === 0 ? 18 : 20,
           carvedBy: '',
           state: '待刻',
           defectNote: '',
-        })
+          currentRevisionNo: 1,
+        }
+        await db.blocks.add(newBlock)
+        // 首块版即首个版次，与建版同生共死（同一事务）
+        await createInitialRevision(newBlock, designer)
       }
     })
     await blockStore.load()
